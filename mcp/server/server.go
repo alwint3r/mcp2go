@@ -46,6 +46,7 @@ type DefaultServer struct {
 	Transport           Transport
 	requestHandlers     RequestHandlersMap
 	cancellableRequests CancellableRequestMap
+	toolManager         ToolManager
 }
 
 type ctxRequestIdKey struct{}
@@ -184,6 +185,50 @@ func WithResourcesCapability(server *DefaultServer, listChanged, subscribe bool)
 
 	if subscribe {
 		server.Capabilities.Resources.Subscribe = &subscribe
+	}
+
+	return server
+}
+
+func WithToolManager(server *DefaultServer, toolManager *ToolManager) *DefaultServer {
+	server.toolManager = *toolManager
+	server.requestHandlers["tools/list"] = func(ctx context.Context, r messages.Request) (*messages.JsonRPCResult, *RequestError) {
+		tools := server.toolManager.ListAllTools()
+		response := &messages.JsonRPCResult{
+			"tools": tools,
+		}
+
+		return response, nil
+	}
+
+	server.requestHandlers["tools/call"] = func(ctx context.Context, r messages.Request) (*messages.JsonRPCResult, *RequestError) {
+		params := *r.Params
+		toolName, ok := params["name"].(string)
+		if !ok {
+			return nil, &RequestError{
+				Err: nil,
+				ForResponse: messages.ErrorResponse{
+					Code:    messages.JsonRPCErrorInvalidParams,
+					Message: "invalid tool name",
+				},
+			}
+		}
+		arguments, ok := params["arguments"].(map[string]interface{})
+		if !ok {
+			return nil, &RequestError{
+				Err: nil,
+				ForResponse: messages.ErrorResponse{
+					Code:    messages.JsonRPCErrorInvalidParams,
+					Message: "invalid tool arguments",
+				},
+			}
+		}
+
+		toolCallResult := server.toolManager.CallTool(ctx, toolName, arguments)
+		var response messages.JsonRPCResult
+		response["content"] = toolCallResult.Content
+		response["isError"] = toolCallResult.IsError
+		return &response, nil
 	}
 
 	return server
