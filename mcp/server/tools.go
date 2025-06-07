@@ -13,7 +13,7 @@ type Tool struct {
 }
 
 type ToolCallContent struct {
-	Type     string  `json:"string"`
+	Type     string  `json:"type"`
 	Text     *string `json:"text,omitempty"`
 	Data     *string `json:"data,omitempty"` // base64-encoded string
 	MimeType *string `json:"mimeType,omitempty"`
@@ -52,6 +52,11 @@ func (t *ToolManager) findTool(name string) (*Tool, *ToolCallback, error) {
 	return tool, &callback, nil
 }
 
+func (t *ToolManager) AddTool(definition Tool, callback ToolCallback) {
+	t.tools = append(t.tools, definition)
+	t.toolCallbacks[definition.Name] = callback
+}
+
 func (t *ToolManager) CallTool(ctx context.Context, name string, arguments map[string]interface{}) ToolResult {
 	toolDef, toolCallback, err := t.findTool(name)
 	if err != nil {
@@ -74,4 +79,11 @@ func (t *ToolManager) CallTool(ctx context.Context, name string, arguments map[s
 
 func (t *ToolManager) ListAllTools() *[]Tool {
 	return &t.tools
+}
+
+func NewToolManager() ToolManager {
+	return ToolManager{
+		tools:         make([]Tool, 0),
+		toolCallbacks: make(ToolCallbacksMap),
+	}
 }

@@ -5,21 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/alwint3r/mcp2go/mcp/messages"
 )
 
 type StdioTransport struct {
-	reader        *bufio.Reader
 	readerChannel chan messages.JsonRPCMessage
 }
 
 func NewStdioTransport() *StdioTransport {
 	readerChannel := make(chan messages.JsonRPCMessage, 10)
 	return &StdioTransport{
-		reader:        bufio.NewReader(os.Stdin),
 		readerChannel: readerChannel,
 	}
 }
@@ -34,7 +31,8 @@ func (s *StdioTransport) Write(msg messages.JsonRPCMessage) error {
 		return err
 	}
 
-	_, err = os.Stdout.Write(marshaled)
+	withNewLine := string(marshaled) + "\n"
+	_, err = os.Stdout.WriteString(withNewLine)
 	if err != nil {
 		return err
 	}
@@ -48,25 +46,27 @@ func (s *StdioTransport) Close() error {
 }
 
 func (s *StdioTransport) Start(ctx context.Context) error {
-	for {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			switch line, err := s.reader.ReadString('\n'); err {
-			case nil:
-				var msg messages.JsonRPCMessage
-				err := json.Unmarshal([]byte(line), &msg)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "error parsing JSON: %v\n", err)
-					continue
-				}
-				s.readerChannel <- msg
-			case io.EOF:
-				os.Exit(0)
-			default:
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			line := scanner.Text()
+			if line == "" {
+				continue
 			}
+
+			var msg messages.JsonRPCMessage
+			err := json.Unmarshal([]byte(line), &msg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error parsing JSON: %v\n", err)
+				continue
+			}
+
+			s.readerChannel <- msg
 		}
 	}
+
+	return nil
 }

@@ -53,7 +53,8 @@ type ctxRequestIdKey struct{}
 
 func (s *DefaultServer) handleInitializeRequest(ctx context.Context, request messages.Request) (*messages.JsonRPCResult, *RequestError) {
 	result := messages.JsonRPCResult{
-		"capabilities": s.Capabilities,
+		"capabilities":    s.Capabilities,
+		"protocolVersion": s.ProtocolVersion,
 		"serverInfo": map[string]string{
 			"name":    s.Name,
 			"version": s.Version,
@@ -120,7 +121,10 @@ func (s *DefaultServer) Run(ctx context.Context) error {
 			if msg.IsRequest() {
 				request := messages.NewRequestFromJsonRPCMessage(msg)
 				response := s.handleRequest(ctx, request)
-				s.Transport.Write(*response)
+				err := s.Transport.Write(*response)
+				if err != nil {
+					return err
+				}
 			} else if msg.IsNotification() {
 
 			} else if msg.IsResponse() {
@@ -225,9 +229,10 @@ func WithToolManager(server *DefaultServer, toolManager *ToolManager) *DefaultSe
 		}
 
 		toolCallResult := server.toolManager.CallTool(ctx, toolName, arguments)
-		var response messages.JsonRPCResult
-		response["content"] = toolCallResult.Content
-		response["isError"] = toolCallResult.IsError
+		response := messages.JsonRPCResult{
+			"content": toolCallResult.Content,
+			"isError": toolCallResult.IsError,
+		}
 		return &response, nil
 	}
 
