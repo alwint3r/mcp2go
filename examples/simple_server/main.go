@@ -11,8 +11,12 @@ import (
 )
 
 func main() {
+	logger := server.NewLogger("Main")
+	logger.ErrOut = os.Stderr
+	logger.Out = os.Stderr
+	logger.Info("Initializing server!")
+
 	transport := server.NewStdioTransport()
-	fmt.Fprintln(os.Stderr, "Initializing server!")
 	defer transport.Close()
 
 	toolManager := server.NewToolManager()
@@ -42,20 +46,33 @@ func main() {
 		}
 	})
 
+	config := server.ServerConfig{
+		LogLevel:         server.LogDebug,
+		ShowTimestamps:   true,
+		MaxRequestActive: 10,
+		LogFile:          "",
+	}
+
 	// Claude app has yet to support the 2025-03-26 protocol version
-	s := server.NewDefaultServer(transport, server.ProtocolVersion20241105, "1.0.0", "SimpleMCPServer")
+	s := server.NewDefaultServerWithConfig(transport, server.ProtocolVersion20241105, "1.0.0", "SimpleMCPServer", config)
 	s = server.WithToolsCapability(s, false, false)
 	s = server.WithToolManager(s, &toolManager)
 
-	ctx := context.Background()
-	fmt.Fprintln(os.Stderr, "Launching server loop thread")
-	go func() {
-		err := s.Run(context.Background())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Server error: %v", err)
-		}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-		fmt.Fprintln(os.Stderr, "Server exiting")
+	serverErrCh := make(chan error, 1)
+	transportErrCh := make(chan error, 1)
+
+	logger.Info("Launching server loop thread")
+	go func() {
+		err := s.Run(ctx)
+		if err != nil {
+			logger.Error("Server error: %v\n", err)
+			serverErrCh <- err
+		}
+		logger.Info("Server exiting")
+		close(serverErrCh)
 	}()
 
 	fmt.Fprintln(os.Stderr, "Starting server transport")
@@ -66,16 +83,41 @@ func main() {
 	go func() {
 		err := transport.Start(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error start transport: %v\n", err)
-			sigChan <- os.Interrupt // Signal main goroutine to exit on error
+			logger.Error("Transport error: %v\n", err)
+			transportErrCh <- err
 		}
-
 		fmt.Fprintln(os.Stderr, "Transport exiting")
+		// Signal completion regardless of whether there was an error
+		close(transportErrCh)
 	}()
 
-	<-sigChan
+	// Wait for a signal to exit or an error from any goroutine
+	select {
+	case <-sigChan:
+		fmt.Fprintln(os.Stderr, "Received termination signal")
+	case err := <-serverErrCh:
+		if err != nil {
+			logger.Error("Server terminated due to error: %v\n", err)
+		}
+	case err := <-transportErrCh:
+		if err != nil {
+			logger.Error("Transport terminated due to error: %v\n", err)
+		}
+	}
 
-	fmt.Fprintln(os.Stderr, "Exiting server")
+	// Cancel all in-progress requests
+	s.CancelAllRequests()
+
+	// Cancel the context to signal all goroutines to shut down
+	cancel()
+
+	logger.Info("Gracefully shutting down...")
+
+	// Wait for both goroutines to finish
+	<-serverErrCh
+	<-transportErrCh
+
+	logger.Info("Exiting server")
 }
 
 // example request
