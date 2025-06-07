@@ -68,14 +68,14 @@ func main() {
 	go func() {
 		err := s.Run(ctx)
 		if err != nil {
-			logger.Error("Server error: %v\n", err)
+			logger.Error("Server error: %v", err)
 			serverErrCh <- err
 		}
 		logger.Info("Server exiting")
 		close(serverErrCh)
 	}()
 
-	fmt.Fprintln(os.Stderr, "Starting server transport")
+	logger.Info("Starting server transport")
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -83,25 +83,24 @@ func main() {
 	go func() {
 		err := transport.Start(ctx)
 		if err != nil {
-			logger.Error("Transport error: %v\n", err)
+			logger.Error("Transport error: %v", err)
 			transportErrCh <- err
 		}
-		fmt.Fprintln(os.Stderr, "Transport exiting")
-		// Signal completion regardless of whether there was an error
+		logger.Info("Transport exiting")
 		close(transportErrCh)
 	}()
 
 	// Wait for a signal to exit or an error from any goroutine
 	select {
 	case <-sigChan:
-		fmt.Fprintln(os.Stderr, "Received termination signal")
+		logger.Info("Received termination signal")
 	case err := <-serverErrCh:
 		if err != nil {
-			logger.Error("Server terminated due to error: %v\n", err)
+			logger.Error("Server terminated due to error: %v", err)
 		}
 	case err := <-transportErrCh:
 		if err != nil {
-			logger.Error("Transport terminated due to error: %v\n", err)
+			logger.Error("Transport terminated due to error: %v", err)
 		}
 	}
 
