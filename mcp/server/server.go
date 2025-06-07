@@ -157,15 +157,12 @@ func (s *DefaultServer) Run(ctx context.Context) error {
 			return fmt.Errorf("server stopped: %w", ctx.Err())
 		case msg, ok := <-s.Transport.Read():
 			if !ok {
-				// Channel was closed, transport has ended
 				s.logger.Error("Transport channel closed unexpectedly")
 				return fmt.Errorf("transport channel closed unexpectedly")
 			}
 
 			if msg.JsonRPC != "2.0" {
-				// Log the error but don't terminate the server
 				s.logger.Warn("Received message with invalid JSON-RPC version: %s", msg.JsonRPC)
-				// Send error response if we have an ID to respond to
 				if msg.ID != nil {
 					errResponse := messages.NewJsonRPCMessage()
 					errResponse.ID = msg.ID

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/alwint3r/mcp2go/mcp/server"
 )
@@ -104,17 +105,28 @@ func main() {
 		}
 	}
 
-	// Cancel all in-progress requests
 	s.CancelAllRequests()
 
-	// Cancel the context to signal all goroutines to shut down
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
 	cancel()
 
 	logger.Info("Gracefully shutting down...")
 
-	// Wait for both goroutines to finish
-	<-serverErrCh
-	<-transportErrCh
+	waitCh := make(chan struct{})
+	go func() {
+		<-serverErrCh
+		<-transportErrCh
+		close(waitCh)
+	}()
+
+	select {
+	case <-waitCh:
+		logger.Info("All goroutines exited successfully")
+	case <-shutdownCtx.Done():
+		logger.Warn("Shutdown timed out, forcing exit")
+	}
 
 	logger.Info("Exiting server")
 }

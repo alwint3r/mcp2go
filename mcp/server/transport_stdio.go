@@ -79,25 +79,74 @@ func (s *StdioTransport) Start(ctx context.Context) error {
 	s.logger.Info("Starting StdIO transport")
 	defer s.logger.Info("StdIO transport stopped")
 
-	scanner := bufio.NewScanner(os.Stdin)
+	scannerCtx, cancelScanner := context.WithCancel(context.Background())
+	defer cancelScanner()
 
-	const maxScannerBuffer = 1024 * 1024 // 1MB
-	buffer := make([]byte, maxScannerBuffer)
-	scanner.Buffer(buffer, maxScannerBuffer)
+	scanErrCh := make(chan error, 1)
+	lineCh := make(chan string, 10)
 
-	// Main scanning loop
-	for scanner.Scan() {
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+
+		const maxScannerBuffer = 1024 * 1024 // 1MB
+		buffer := make([]byte, maxScannerBuffer)
+		scanner.Buffer(buffer, maxScannerBuffer)
+
+		go func() {
+			<-scannerCtx.Done()
+			// Force stdin to close/unblock by closing file descriptor
+			// This is a hack to unblock scanner.Scan() when context is cancelled
+			// Note that this won't work on Windows, but it's a Unix-specific solution
+			f, _ := os.Open("/dev/null")
+			os.Stdin.Close() // This will cause scanner.Scan() to return false
+			os.Stdin = f     // Replace with a dummy file
+		}()
+
+		for scanner.Scan() {
+			select {
+			case <-scannerCtx.Done():
+				return
+			default:
+				line := scanner.Text()
+				if line == "" {
+					continue
+				}
+
+				select {
+				case lineCh <- line:
+				case <-scannerCtx.Done():
+					return
+				}
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			scanErrCh <- fmt.Errorf("scanner error: %w", err)
+		}
+
+		close(lineCh)
+	}()
+
+	for {
 		select {
 		case <-ctx.Done():
 			s.logger.Info("Context cancelled, stopping transport: %v", ctx.Err())
+			cancelScanner()
 			return fmt.Errorf("transport stopped: %w", ctx.Err())
-		default:
-			line := scanner.Text()
-			if line == "" {
-				continue
+
+		case err := <-scanErrCh:
+			s.logger.Error("Scanner error: %v", err)
+			cancelScanner()
+			return err
+
+		case line, ok := <-lineCh:
+			if !ok {
+				s.logger.Info("End of input reached, transport stopping normally")
+				return nil
 			}
 
 			s.logger.Debug("Received input line: %d bytes", len(line))
+
 			var msg messages.JsonRPCMessage
 			err := json.Unmarshal([]byte(line), &msg)
 			if err != nil {
@@ -127,16 +176,9 @@ func (s *StdioTransport) Start(ctx context.Context) error {
 				}
 			case <-ctx.Done():
 				s.logger.Warn("Context cancelled while sending message")
+				cancelScanner()
 				return fmt.Errorf("transport stopped while sending message: %w", ctx.Err())
 			}
 		}
 	}
-
-	if err := scanner.Err(); err != nil {
-		s.logger.Error("Scanner error: %v", err)
-		return fmt.Errorf("scanner error: %w", err)
-	}
-
-	s.logger.Info("End of input reached, transport stopping normally")
-	return nil
 }
