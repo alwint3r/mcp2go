@@ -48,10 +48,11 @@ func main() {
 	})
 
 	config := server.ServerConfig{
-		LogLevel:         server.LogDebug,
-		ShowTimestamps:   true,
-		MaxRequestActive: 10,
-		LogFile:          "",
+		LogLevel:                      server.LogDebug,
+		ShowTimestamps:                true,
+		MaxRequestActive:              10,
+		LogFile:                       "",
+		OutgoingMessageTimeoutSeconds: 5,
 	}
 
 	// Claude app has yet to support the 2025-03-26 protocol version
