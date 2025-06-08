@@ -4,21 +4,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 type ServerConfig struct {
-	LogLevel         LogLevel `json:"logLevel"`
-	ShowTimestamps   bool     `json:"showTimestamps"`
-	MaxRequestActive int      `json:"maxRequestActive"`
-	LogFile          string   `json:"logFile"`
+	LogLevel                      LogLevel      `json:"logLevel"`
+	ShowTimestamps                bool          `json:"showTimestamps"`
+	MaxRequestActive              int           `json:"maxRequestActive"`
+	LogFile                       string        `json:"logFile"`
+	OutgoingMessageTimeoutSeconds time.Duration `json:"outgoingMessageTimeoutSeconds"`
 }
 
 func NewDefaultConfig() ServerConfig {
 	return ServerConfig{
-		LogLevel:         LogInfo,
-		ShowTimestamps:   true,
-		MaxRequestActive: 10,
-		LogFile:          "",
+		LogLevel:                      LogInfo,
+		ShowTimestamps:                true,
+		MaxRequestActive:              10,
+		LogFile:                       "",
+		OutgoingMessageTimeoutSeconds: 15, // Increased from 5 to 15 seconds
 	}
 }
 

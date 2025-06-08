@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/alwint3r/mcp2go/mcp/messages"
 )
@@ -51,6 +52,7 @@ type DefaultServer struct {
 	cancelMutex         sync.RWMutex // Protects access to cancellableRequests
 	toolManager         ToolManager
 	logger              *Logger
+	config              ServerConfig
 }
 
 type ctxRequestIdKey struct{}
@@ -109,6 +111,24 @@ func (s *DefaultServer) handleRequest(ctx context.Context, request messages.Requ
 
 	message.Result = handlerResult
 	return message
+}
+
+func (s *DefaultServer) handleNotification(message *messages.JsonRPCMessage) {
+	if *message.Method == "notifications/cancelled" {
+		if message.Params == nil {
+			s.logger.Warn("Received cancellations notification with empty params")
+			return
+		}
+		params := *message.Params
+		if requestID, ok := params["requestId"]; ok {
+			s.logger.Info("Cancellation request received for ID: %v", requestID)
+			if cancelled := s.CancelRequest(requestID); cancelled {
+				s.logger.Info("Successfully cancelled request ID: %v", requestID)
+			} else {
+				s.logger.Warn("Could not cancel request ID: %v (not found)", requestID)
+			}
+		}
+	}
 }
 
 func (s *DefaultServer) findRequestHandler(request *messages.Request) (RequestHandler, error) {
@@ -170,9 +190,10 @@ func (s *DefaultServer) Run(ctx context.Context) error {
 						Code:    messages.JsonRPCErrorInvalidRequest,
 						Message: "Invalid JSON-RPC protocol version",
 					}
-					if err := s.Transport.Write(*errResponse); err != nil {
+					withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
+					defer cancel()
+					if err := s.Transport.Write(*errResponse, withTimeoutCtx); err != nil {
 						s.logger.Error("Failed to write error response: %v", err)
-						return fmt.Errorf("failed to write error response: %w", err)
 					}
 				}
 				continue
@@ -181,26 +202,18 @@ func (s *DefaultServer) Run(ctx context.Context) error {
 			if msg.IsRequest() {
 				request := messages.NewRequestFromJsonRPCMessage(msg)
 				s.logger.Debug("Handling request: %s (ID: %v)", request.Method, request.ID)
-				response := s.handleRequest(ctx, request)
-				if err := s.Transport.Write(*response); err != nil {
-					s.logger.Error("Failed to write response: %v", err)
-					return fmt.Errorf("failed to write response: %w", err)
-				}
+				go func(request messages.Request, ctx context.Context) {
+					withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
+					defer cancel()
+					response := s.handleRequest(ctx, request)
+					if err := s.Transport.Write(*response, withTimeoutCtx); err != nil {
+						s.logger.Error("Failed to write response: %v", err)
+					}
+				}(request, ctx)
+
 			} else if msg.IsNotification() {
 				s.logger.Debug("Received notification: %s", *msg.Method)
-				if *msg.Method == "notifications/cancelled" {
-					if msg.Params != nil {
-						params := *msg.Params
-						if requestID, ok := params["requestId"]; ok {
-							s.logger.Info("Cancellation request received for ID: %v", requestID)
-							if cancelled := s.CancelRequest(requestID); cancelled {
-								s.logger.Info("Successfully cancelled request ID: %v", requestID)
-							} else {
-								s.logger.Warn("Could not cancel request ID: %v (not found)", requestID)
-							}
-						}
-					}
-				}
+				go s.handleNotification(&msg)
 			} else if msg.IsResponse() {
 				s.logger.Debug("Received response message with ID: %v", msg.ID)
 			} else {
@@ -212,9 +225,10 @@ func (s *DefaultServer) Run(ctx context.Context) error {
 						Code:    messages.JsonRPCErrorInvalidRequest,
 						Message: "Invalid message type",
 					}
-					if err := s.Transport.Write(*errResponse); err != nil {
+					withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
+					defer cancel()
+					if err := s.Transport.Write(*errResponse, withTimeoutCtx); err != nil {
 						s.logger.Error("Failed to write error response: %v", err)
-						return fmt.Errorf("failed to write error response: %w", err)
 					}
 				}
 			}
@@ -253,6 +267,7 @@ func NewDefaultServerWithConfig(transport Transport, protocolVersion string, ver
 		cancellableRequests: make(CancellableRequestMap),
 		Capabilities:        Capabilities{},
 		logger:              logger,
+		config:              config,
 	}
 
 	server.requestHandlers["initialize"] = server.handleInitializeRequest

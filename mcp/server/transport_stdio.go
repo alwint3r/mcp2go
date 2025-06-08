@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/alwint3r/mcp2go/mcp/messages"
 )
@@ -13,24 +14,24 @@ import (
 type StdioTransport struct {
 	readerChannel chan messages.JsonRPCMessage
 	logger        *Logger
+	writerChannel chan messages.JsonRPCMessage
 }
 
 func NewStdioTransport() *StdioTransport {
-	readerChannel := make(chan messages.JsonRPCMessage, 10)
+	const channelCapacity = 100
+	readerChannel := make(chan messages.JsonRPCMessage, channelCapacity)
+	writerChannel := make(chan messages.JsonRPCMessage, channelCapacity)
 	logger := NewLogger("StdioTransport")
 	logger.Out = os.Stderr
 	logger.ErrOut = os.Stderr
 	return &StdioTransport{
 		readerChannel: readerChannel,
 		logger:        logger,
+		writerChannel: writerChannel,
 	}
 }
 
-func (s *StdioTransport) Read() <-chan messages.JsonRPCMessage {
-	return s.readerChannel
-}
-
-func (s *StdioTransport) Write(msg messages.JsonRPCMessage) error {
+func (s *StdioTransport) write(msg messages.JsonRPCMessage) error {
 	marshaled, err := json.Marshal(msg)
 	if err != nil {
 		s.logger.Error("Failed to marshal message: %v", err)
@@ -44,6 +45,14 @@ func (s *StdioTransport) Write(msg messages.JsonRPCMessage) error {
 		return fmt.Errorf("failed to write to stdout: %w", err)
 	}
 
+	return nil
+}
+
+func (s *StdioTransport) Read() <-chan messages.JsonRPCMessage {
+	return s.readerChannel
+}
+
+func (s *StdioTransport) Write(msg messages.JsonRPCMessage, ctx context.Context) error {
 	if msg.IsResponse() {
 		if msg.Error != nil {
 			s.logger.Debug("Sent error response: id=%v, code=%d", msg.ID, msg.Error.Code)
@@ -56,7 +65,21 @@ func (s *StdioTransport) Write(msg messages.JsonRPCMessage) error {
 		s.logger.Debug("Sent notification: method=%s", *msg.Method)
 	}
 
-	return nil
+	// Try to write to channel non-blocking first
+	select {
+	case s.writerChannel <- msg:
+		return nil
+	default:
+		// Channel is full, try with timeout
+		select {
+		case s.writerChannel <- msg:
+			return nil
+		case <-ctx.Done():
+			// Context deadline exceeded, fall back to direct write
+			s.logger.Warn("Writer channel full, falling back to direct write: %v", ctx.Err())
+			return s.write(msg) // Direct write as fallback
+		}
+	}
 }
 
 func (s *StdioTransport) Close() error {
@@ -158,7 +181,9 @@ func (s *StdioTransport) Start(ctx context.Context) error {
 				}
 
 				go func() {
-					if writeErr := s.Write(*errorMsg); writeErr != nil {
+					withTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+					if writeErr := s.Write(*errorMsg, withTimeout); writeErr != nil {
 						s.logger.Error("Failed to write error response: %v", writeErr)
 					}
 				}()
@@ -179,6 +204,13 @@ func (s *StdioTransport) Start(ctx context.Context) error {
 				cancelScanner()
 				return fmt.Errorf("transport stopped while sending message: %w", ctx.Err())
 			}
+
+		case outgoing := <-s.writerChannel:
+			err := s.write(outgoing)
+			if err != nil {
+				s.logger.Error("Failed to write response: %v", err)
+			}
 		}
+
 	}
 }
