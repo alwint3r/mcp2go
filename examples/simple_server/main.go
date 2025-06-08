@@ -18,7 +18,7 @@ func main() {
 	logger.Info("Initializing server!")
 
 	transport := server.NewStdioTransport()
-	defer transport.Close()
+	defer transport.Stop()
 
 	toolManager := server.NewToolManager()
 	toolManager.AddTool(server.Tool{
@@ -68,7 +68,7 @@ func main() {
 
 	logger.Info("Launching server loop thread")
 	go func() {
-		err := s.Run(ctx)
+		err := s.Start(ctx)
 		if err != nil {
 			logger.Error("Server error: %v", err)
 			serverErrCh <- err
@@ -106,7 +106,7 @@ func main() {
 		}
 	}
 
-	s.CancelAllRequests()
+	s.Close()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()

@@ -82,7 +82,7 @@ func (s *StdioTransport) Write(msg messages.JsonRPCMessage, ctx context.Context)
 	}
 }
 
-func (s *StdioTransport) Close() error {
+func (s *StdioTransport) Stop() error {
 	s.logger.Info("Closing transport")
 
 	func() {
@@ -211,6 +211,5 @@ func (s *StdioTransport) Start(ctx context.Context) error {
 				s.logger.Error("Failed to write response: %v", err)
 			}
 		}
-
 	}
 }

@@ -7,9 +7,11 @@ import (
 )
 
 type Transport interface {
+	Start(ctx context.Context) error
+
 	Read() <-chan messages.JsonRPCMessage
 
 	Write(msg messages.JsonRPCMessage, ctx context.Context) error
 
-	Close() error
+	Stop() error
 }

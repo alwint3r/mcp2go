@@ -33,33 +33,36 @@ type RequestError struct {
 	ForResponse messages.ErrorResponse
 }
 
-type Server interface {
+type CoreServer interface {
+	Start(context.Context) error
+	Close() error
 }
 
 type RequestHandler func(context.Context, messages.Request) (*messages.JsonRPCResult, *RequestError)
 type RequestHandlersMap map[string]RequestHandler
-
 type CancellableRequestMap map[interface{}]context.CancelFunc
 
 type DefaultServer struct {
 	Name                string
 	Version             string
-	Capabilities        Capabilities
 	ProtocolVersion     string
-	Transport           Transport
+	capabilities        Capabilities
+	transport           Transport
 	requestHandlers     RequestHandlersMap
 	cancellableRequests CancellableRequestMap
 	cancelMutex         sync.RWMutex // Protects access to cancellableRequests
-	toolManager         ToolManager
+	toolManager         *ToolManager
 	logger              *Logger
 	config              ServerConfig
+	closeSignalChan     chan int
+	closeOnce           sync.Once
 }
 
 type ctxRequestIdKey struct{}
 
 func (s *DefaultServer) handleInitializeRequest(ctx context.Context, request messages.Request) (*messages.JsonRPCResult, *RequestError) {
 	result := messages.JsonRPCResult{
-		"capabilities":    s.Capabilities,
+		"capabilities":    s.capabilities,
 		"protocolVersion": s.ProtocolVersion,
 		"serverInfo": map[string]string{
 			"name":    s.Name,
@@ -122,7 +125,7 @@ func (s *DefaultServer) handleNotification(message *messages.JsonRPCMessage) {
 		params := *message.Params
 		if requestID, ok := params["requestId"]; ok {
 			s.logger.Info("Cancellation request received for ID: %v", requestID)
-			if cancelled := s.CancelRequest(requestID); cancelled {
+			if cancelled := s.cancelRequest(requestID); cancelled {
 				s.logger.Info("Successfully cancelled request ID: %v", requestID)
 			} else {
 				s.logger.Warn("Could not cancel request ID: %v (not found)", requestID)
@@ -181,8 +184,7 @@ func (s *DefaultServer) handleToolCallRequest(ctx context.Context, request messa
 	return &response, nil
 }
 
-// CancelRequest cancels a request that is in progress, thread-safe
-func (s *DefaultServer) CancelRequest(id interface{}) bool {
+func (s *DefaultServer) cancelRequest(id interface{}) bool {
 	s.cancelMutex.Lock()
 	defer s.cancelMutex.Unlock()
 
@@ -195,8 +197,7 @@ func (s *DefaultServer) CancelRequest(id interface{}) bool {
 	return false
 }
 
-// CancelAllRequests cancels all in-progress requests, thread-safe
-func (s *DefaultServer) CancelAllRequests() {
+func (s *DefaultServer) cancelAllRequest() {
 	s.cancelMutex.Lock()
 	defer s.cancelMutex.Unlock()
 
@@ -206,16 +207,27 @@ func (s *DefaultServer) CancelAllRequests() {
 	}
 }
 
-func (s *DefaultServer) Run(ctx context.Context) error {
+func (s *DefaultServer) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.closeSignalChan)
+		s.cancelAllRequest()
+	})
+	return nil
+}
+
+func (s *DefaultServer) Start(ctx context.Context) error {
 	s.logger.Info("Server started")
 	defer s.logger.Info("Server stopping")
 
 	for {
 		select {
+		case <-s.closeSignalChan:
+			s.logger.Info("Server will stop due to request")
+			return nil
 		case <-ctx.Done():
 			s.logger.Info("Context cancelled, server stopping: %v", ctx.Err())
 			return fmt.Errorf("server stopped: %w", ctx.Err())
-		case msg, ok := <-s.Transport.Read():
+		case msg, ok := <-s.transport.Read():
 			if !ok {
 				s.logger.Error("Transport channel closed unexpectedly")
 				return fmt.Errorf("transport channel closed unexpectedly")
@@ -232,7 +244,7 @@ func (s *DefaultServer) Run(ctx context.Context) error {
 					}
 					withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
 					defer cancel()
-					if err := s.Transport.Write(*errResponse, withTimeoutCtx); err != nil {
+					if err := s.transport.Write(*errResponse, withTimeoutCtx); err != nil {
 						s.logger.Error("Failed to write error response: %v", err)
 					}
 				}
@@ -246,7 +258,7 @@ func (s *DefaultServer) Run(ctx context.Context) error {
 					withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
 					defer cancel()
 					response := s.handleRequest(ctx, request)
-					if err := s.Transport.Write(*response, withTimeoutCtx); err != nil {
+					if err := s.transport.Write(*response, withTimeoutCtx); err != nil {
 						s.logger.Error("Failed to write response: %v", err)
 					}
 				}(request, ctx)
@@ -267,7 +279,7 @@ func (s *DefaultServer) Run(ctx context.Context) error {
 					}
 					withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
 					defer cancel()
-					if err := s.Transport.Write(*errResponse, withTimeoutCtx); err != nil {
+					if err := s.transport.Write(*errResponse, withTimeoutCtx); err != nil {
 						s.logger.Error("Failed to write error response: %v", err)
 					}
 				}
@@ -301,13 +313,14 @@ func NewDefaultServerWithConfig(transport Transport, protocolVersion string, ver
 	server := &DefaultServer{
 		Version:             version,
 		Name:                name,
-		Transport:           transport,
+		transport:           transport,
 		ProtocolVersion:     protocolVersion,
 		requestHandlers:     make(RequestHandlersMap),
 		cancellableRequests: make(CancellableRequestMap),
-		Capabilities:        Capabilities{},
+		capabilities:        Capabilities{},
 		logger:              logger,
 		config:              config,
+		closeSignalChan:     make(chan int, 1),
 	}
 
 	server.requestHandlers["initialize"] = server.handleInitializeRequest
@@ -316,51 +329,51 @@ func NewDefaultServerWithConfig(transport Transport, protocolVersion string, ver
 }
 
 func WithLoggingCapability(server *DefaultServer) *DefaultServer {
-	server.Capabilities.Logging = &CapabilityProperties{}
+	server.capabilities.Logging = &CapabilityProperties{}
 	return server
 }
 
 func WithToolsCapability(server *DefaultServer, listChanged, subscribe bool) *DefaultServer {
-	server.Capabilities.Tools = &CapabilityProperties{}
+	server.capabilities.Tools = &CapabilityProperties{}
 	if listChanged {
-		server.Capabilities.Tools.ListChanged = &listChanged
+		server.capabilities.Tools.ListChanged = &listChanged
 	}
 
 	if subscribe {
-		server.Capabilities.Tools.Subscribe = &subscribe
+		server.capabilities.Tools.Subscribe = &subscribe
 	}
 
 	return server
 }
 
 func WithPromptsCapability(server *DefaultServer, listChanged, subscribe bool) *DefaultServer {
-	server.Capabilities.Prompts = &CapabilityProperties{}
+	server.capabilities.Prompts = &CapabilityProperties{}
 	if listChanged {
-		server.Capabilities.Prompts.ListChanged = &listChanged
+		server.capabilities.Prompts.ListChanged = &listChanged
 	}
 
 	if subscribe {
-		server.Capabilities.Prompts.Subscribe = &subscribe
+		server.capabilities.Prompts.Subscribe = &subscribe
 	}
 
 	return server
 }
 
 func WithResourcesCapability(server *DefaultServer, listChanged, subscribe bool) *DefaultServer {
-	server.Capabilities.Resources = &CapabilityProperties{}
+	server.capabilities.Resources = &CapabilityProperties{}
 	if listChanged {
-		server.Capabilities.Resources.ListChanged = &listChanged
+		server.capabilities.Resources.ListChanged = &listChanged
 	}
 
 	if subscribe {
-		server.Capabilities.Resources.Subscribe = &subscribe
+		server.capabilities.Resources.Subscribe = &subscribe
 	}
 
 	return server
 }
 
 func WithToolManager(server *DefaultServer, toolManager *ToolManager) *DefaultServer {
-	server.toolManager = *toolManager
+	server.toolManager = toolManager
 	server.requestHandlers["tools/list"] = server.handleToolListRequest
 	server.requestHandlers["tools/call"] = server.handleToolCallRequest
 
