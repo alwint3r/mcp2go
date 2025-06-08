@@ -215,6 +215,61 @@ func (s *DefaultServer) Close() error {
 	return nil
 }
 
+func (s *DefaultServer) handleMessageFromTransport(ctx context.Context, msg *messages.JsonRPCMessage) {
+	if msg.JsonRPC != "2.0" {
+		s.logger.Warn("Received message with invalid JSON-RPC version: %s", msg.JsonRPC)
+		if msg.ID != nil {
+			errResponse := messages.NewJsonRPCMessage()
+			errResponse.ID = msg.ID
+			errResponse.Error = &messages.ErrorResponse{
+				Code:    messages.JsonRPCErrorInvalidRequest,
+				Message: "Invalid JSON-RPC protocol version",
+			}
+			withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
+			defer cancel()
+			if err := s.transport.Write(*errResponse, withTimeoutCtx); err != nil {
+				s.logger.Error("Failed to write error response: %v", err)
+			}
+		}
+		return
+	}
+
+	if msg.IsRequest() {
+		request := messages.NewRequestFromJsonRPCMessage(*msg)
+		s.logger.Debug("Handling request: %s (ID: %v)", request.Method, request.ID)
+		go func(request messages.Request, ctx context.Context) {
+			withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
+			defer cancel()
+			response := s.handleRequest(ctx, request)
+			if err := s.transport.Write(*response, withTimeoutCtx); err != nil {
+				s.logger.Error("Failed to write response: %v", err)
+			}
+		}(request, ctx)
+
+	} else if msg.IsNotification() {
+		s.logger.Debug("Received notification: %s", *msg.Method)
+		go s.handleNotification(msg)
+	} else if msg.IsResponse() {
+		s.logger.Debug("Received response message with ID: %v", msg.ID)
+	} else {
+		s.logger.Warn("Received invalid message type")
+		if msg.ID != nil {
+			errResponse := messages.NewJsonRPCMessage()
+			errResponse.ID = msg.ID
+			errResponse.Error = &messages.ErrorResponse{
+				Code:    messages.JsonRPCErrorInvalidRequest,
+				Message: "Invalid message type",
+			}
+			withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
+			defer cancel()
+			if err := s.transport.Write(*errResponse, withTimeoutCtx); err != nil {
+				s.logger.Error("Failed to write error response: %v", err)
+			}
+		}
+	}
+
+}
+
 func (s *DefaultServer) Start(ctx context.Context) error {
 	s.logger.Info("Server started")
 	defer s.logger.Info("Server stopping")
@@ -233,57 +288,7 @@ func (s *DefaultServer) Start(ctx context.Context) error {
 				return fmt.Errorf("transport channel closed unexpectedly")
 			}
 
-			if msg.JsonRPC != "2.0" {
-				s.logger.Warn("Received message with invalid JSON-RPC version: %s", msg.JsonRPC)
-				if msg.ID != nil {
-					errResponse := messages.NewJsonRPCMessage()
-					errResponse.ID = msg.ID
-					errResponse.Error = &messages.ErrorResponse{
-						Code:    messages.JsonRPCErrorInvalidRequest,
-						Message: "Invalid JSON-RPC protocol version",
-					}
-					withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
-					defer cancel()
-					if err := s.transport.Write(*errResponse, withTimeoutCtx); err != nil {
-						s.logger.Error("Failed to write error response: %v", err)
-					}
-				}
-				continue
-			}
-
-			if msg.IsRequest() {
-				request := messages.NewRequestFromJsonRPCMessage(msg)
-				s.logger.Debug("Handling request: %s (ID: %v)", request.Method, request.ID)
-				go func(request messages.Request, ctx context.Context) {
-					withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
-					defer cancel()
-					response := s.handleRequest(ctx, request)
-					if err := s.transport.Write(*response, withTimeoutCtx); err != nil {
-						s.logger.Error("Failed to write response: %v", err)
-					}
-				}(request, ctx)
-
-			} else if msg.IsNotification() {
-				s.logger.Debug("Received notification: %s", *msg.Method)
-				go s.handleNotification(&msg)
-			} else if msg.IsResponse() {
-				s.logger.Debug("Received response message with ID: %v", msg.ID)
-			} else {
-				s.logger.Warn("Received invalid message type")
-				if msg.ID != nil {
-					errResponse := messages.NewJsonRPCMessage()
-					errResponse.ID = msg.ID
-					errResponse.Error = &messages.ErrorResponse{
-						Code:    messages.JsonRPCErrorInvalidRequest,
-						Message: "Invalid message type",
-					}
-					withTimeoutCtx, cancel := context.WithTimeout(ctx, s.config.OutgoingMessageTimeoutSeconds*time.Second)
-					defer cancel()
-					if err := s.transport.Write(*errResponse, withTimeoutCtx); err != nil {
-						s.logger.Error("Failed to write error response: %v", err)
-					}
-				}
-			}
+			s.handleMessageFromTransport(ctx, &msg)
 		}
 	}
 }
