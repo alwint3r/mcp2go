@@ -141,6 +141,46 @@ func (s *DefaultServer) findRequestHandler(request *messages.Request) (RequestHa
 	return handler, nil
 }
 
+func (s *DefaultServer) handleToolListRequest(ctx context.Context, request messages.Request) (*messages.JsonRPCResult, *RequestError) {
+	tools := s.toolManager.ListAllTools()
+	response := &messages.JsonRPCResult{
+		"tools": tools,
+	}
+
+	return response, nil
+}
+
+func (s *DefaultServer) handleToolCallRequest(ctx context.Context, request messages.Request) (*messages.JsonRPCResult, *RequestError) {
+	params := *request.Params
+	toolName, ok := params["name"].(string)
+	if !ok {
+		return nil, &RequestError{
+			Err: nil,
+			ForResponse: messages.ErrorResponse{
+				Code:    messages.JsonRPCErrorInvalidParams,
+				Message: "invalid tool name",
+			},
+		}
+	}
+	arguments, ok := params["arguments"].(map[string]interface{})
+	if !ok {
+		return nil, &RequestError{
+			Err: nil,
+			ForResponse: messages.ErrorResponse{
+				Code:    messages.JsonRPCErrorInvalidParams,
+				Message: "invalid tool arguments",
+			},
+		}
+	}
+
+	toolCallResult := s.toolManager.CallTool(ctx, toolName, arguments)
+	response := messages.JsonRPCResult{
+		"content": toolCallResult.Content,
+		"isError": toolCallResult.IsError,
+	}
+	return &response, nil
+}
+
 // CancelRequest cancels a request that is in progress, thread-safe
 func (s *DefaultServer) CancelRequest(id interface{}) bool {
 	s.cancelMutex.Lock()
@@ -321,45 +361,8 @@ func WithResourcesCapability(server *DefaultServer, listChanged, subscribe bool)
 
 func WithToolManager(server *DefaultServer, toolManager *ToolManager) *DefaultServer {
 	server.toolManager = *toolManager
-	server.requestHandlers["tools/list"] = func(ctx context.Context, r messages.Request) (*messages.JsonRPCResult, *RequestError) {
-		tools := server.toolManager.ListAllTools()
-		response := &messages.JsonRPCResult{
-			"tools": tools,
-		}
-
-		return response, nil
-	}
-
-	server.requestHandlers["tools/call"] = func(ctx context.Context, r messages.Request) (*messages.JsonRPCResult, *RequestError) {
-		params := *r.Params
-		toolName, ok := params["name"].(string)
-		if !ok {
-			return nil, &RequestError{
-				Err: nil,
-				ForResponse: messages.ErrorResponse{
-					Code:    messages.JsonRPCErrorInvalidParams,
-					Message: "invalid tool name",
-				},
-			}
-		}
-		arguments, ok := params["arguments"].(map[string]interface{})
-		if !ok {
-			return nil, &RequestError{
-				Err: nil,
-				ForResponse: messages.ErrorResponse{
-					Code:    messages.JsonRPCErrorInvalidParams,
-					Message: "invalid tool arguments",
-				},
-			}
-		}
-
-		toolCallResult := server.toolManager.CallTool(ctx, toolName, arguments)
-		response := messages.JsonRPCResult{
-			"content": toolCallResult.Content,
-			"isError": toolCallResult.IsError,
-		}
-		return &response, nil
-	}
+	server.requestHandlers["tools/list"] = server.handleToolListRequest
+	server.requestHandlers["tools/call"] = server.handleToolCallRequest
 
 	return server
 }
