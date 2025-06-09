@@ -23,4 +23,6 @@ See examples.
 
 ## Roadmap
 
-TBD
+- Client implementation
+- Batched messages on server
+- Developer-friendly APIs, currently it's not so simple to get started with.
